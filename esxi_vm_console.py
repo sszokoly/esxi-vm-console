@@ -780,9 +780,9 @@ if __name__ == "__main__":
 
     # For testing purposes only, do not remove
     # sys.argv.extend([
-    #     "--hostname", "192.168.200.161",
+    #     "--hostname", "192.168.255.161",
     #     "--username", "root",
-    #     "--password", "cmb@Dm1n",
+    #     "--password", "blablabla,
     #     "--name", "SBCE-VM",
     #     "--command", "echo Hello World!", "5",
     #     "--command", "echo Bye World!", "1",
