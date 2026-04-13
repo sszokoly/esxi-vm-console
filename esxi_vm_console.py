@@ -2,7 +2,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 """
-VMware console keyboard utility.
+ESXi guest VM console client.
 """
 
 import os
@@ -10,7 +10,6 @@ import re
 import ssl
 import sys
 import time
-import argparse
 import datetime
 import urllib.request
 import urllib.parse
@@ -39,6 +38,28 @@ SPECIAL_KEYS = {
     "BACKSPACE": 0x2A,
     "TAB": 0x2B,
     "SPACE": 0x2C,
+    "F1": 0x3A,
+    "F2": 0x3B,
+    "F3": 0x3C,
+    "F4": 0x3D,
+    "F5": 0x3E,
+    "F6": 0x3F,
+    "F7": 0x40,
+    "F8": 0x41,
+    "F9": 0x42,
+    "F10": 0x43,
+    "F11": 0x44,
+    "F12": 0x45,
+    "INSERT": 0x49,
+    "HOME": 0x4A,
+    "PAGEUP": 0x4B,
+    "DELETE": 0x4C,
+    "END": 0x4D,
+    "PAGEDOWN": 0x4E,
+    "RIGHT": 0x4F,
+    "LEFT": 0x50,
+    "DOWN": 0x51,
+    "UP": 0x52,
     "NUMPAD_SLASH": 0x54,
     "NUMPAD_STAR": 0x55,
     "NUMPAD_MINUS": 0x56,
@@ -118,7 +139,7 @@ CHAR_MAP = {
 }
 
 
-def host_name_matches(actual, wanted):
+def _hostname_name_matches(actual, wanted):
     if not actual or not wanted:
         return False
     a, w = actual.lower(), wanted.lower()
@@ -140,7 +161,7 @@ def _find_datacenter(content, name):
     raise RuntimeError("Datacenter not found: {0!r}".format(name))
 
 
-def _find_vm(content, vmname, datacenter=None, esxi_hostname=None):
+def _find_vm(content, name, datacenter=None, esxi_hostname=None):
     if datacenter:
         dc = _find_datacenter(content, datacenter)
         root = dc.vmFolder
@@ -153,20 +174,20 @@ def _find_vm(content, vmname, datacenter=None, esxi_hostname=None):
     matches = []
     try:
         for vm in container.view:
-            if vm.name != vmname:
+            if vm.name != name:
                 continue
             if esxi_hostname:
-                host = vm.runtime.host
-                if host is None:
+                hostname = vm.runtime.host
+                if hostname is None:
                     continue
-                if not host_name_matches(host.name, esxi_hostname):
+                if not _hostname_name_matches(hostname.name, esxi_hostname):
                     continue
             matches.append(vm)
     finally:
         container.Destroy()
 
     if not matches:
-        msg = "VM not found: {0!r}".format(vmname)
+        msg = "VM not found: {0!r}".format(name)
         if datacenter:
             msg += " (datacenter={0!r})".format(datacenter)
         if esxi_hostname:
@@ -174,13 +195,13 @@ def _find_vm(content, vmname, datacenter=None, esxi_hostname=None):
         raise RuntimeError(msg)
     
     if len(matches) > 1:
-        hosts = []
+        hostnames = []
         for vm in matches:
             h = vm.runtime.host
-            hosts.append(h.name if h else "?")
+            hostnames.append(h.name if h else "?")
         raise RuntimeError(
-            "Multiple VMs named {0!r} after filtering: hosts {1!r}".format(
-                vmname, hosts
+            "Multiple VMs named {0!r} after filtering: host {1!r}".format(
+                name, hostnames
             )
         )
     return matches[0]
@@ -236,16 +257,16 @@ def _get_vm_datacenter(vm):
     return None
 
 
-def _normalize_datastore_url(url, host):
+def _normalize_datastore_url(url, hostname):
     if not url:
         return url
     parsed = urllib.parse.urlparse(url)
-    if parsed.netloc == "*" and host:
-        return urllib.parse.urlunparse(parsed._replace(netloc=host))
+    if parsed.netloc == "*" and hostname:
+        return urllib.parse.urlunparse(parsed._replace(netloc=hostname))
     return url
 
 
-def _build_datastore_file_url(datastore_path, datacenter_obj, host):
+def _build_datastore_file_url(datastore_path, datacenter_obj, hostname):
     if not isinstance(datastore_path, str):
         return None
     match = re.match(r"^\s*\[([^\]]+)\]\s*(.+)$", datastore_path)
@@ -257,7 +278,7 @@ def _build_datastore_file_url(datastore_path, datacenter_obj, host):
     if not file_path:
         return None
 
-    if not host or host == "*":
+    if not hostname or hostname == "*":
         return None
     if datacenter_obj is None or not getattr(datacenter_obj, "name", None):
         return None
@@ -265,14 +286,24 @@ def _build_datastore_file_url(datastore_path, datacenter_obj, host):
     encoded_path = urllib.parse.quote(file_path, safe="/")
     encoded_dc = urllib.parse.quote(datacenter_obj.name, safe="")
     encoded_ds = urllib.parse.quote(datastore_name, safe="")
-    return "https://{host}/folder/{path}?dcPath={dc}&dsName={ds}".format(
-        host=host, path=encoded_path, dc=encoded_dc, ds=encoded_ds
+    return "https://{hostname}/folder/{path}?dcPath={dc}&dsName={ds}".format(
+        hostname=hostname, path=encoded_path, dc=encoded_dc, ds=encoded_ds
     )
 
 
-def _download_datastore_file(si, content, datacenter_obj, datastore_path, out_path, verify_tls=True):
+def _download_datastore_file(
+    si,
+    content,
+    datacenter_obj,
+    datastore_path,
+    out_path,
+    validate_certs=True
+):
     download_url = None
-    transfer_method = getattr(content.fileManager, "InitiateFileTransferFromDatastore", None)
+    transfer_method = getattr(
+        content.fileManager,
+        "InitiateFileTransferFromDatastore", None
+    )
     if transfer_method is not None:
         fti = content.fileManager.InitiateFileTransferFromDatastore(
             datacenter=datacenter_obj, datastorePath=datastore_path
@@ -286,16 +317,16 @@ def _download_datastore_file(si, content, datacenter_obj, datastore_path, out_pa
         download_url = datastore_path
     else:
         stub = getattr(si, "_stub", None)
-        host = None
+        hostname = None
         if stub is not None:
-            host = getattr(stub, "host", None)
-            if not host:
+            hostname = getattr(stub, "hostname", None)
+            if not hostname:
                 uri = getattr(stub, "uri", None)
                 if uri:
                     parsed_uri = urllib.parse.urlparse(uri)
-                    host = parsed_uri.netloc
+                    hostname = parsed_uri.netloc
 
-        download_url = _build_datastore_file_url(datastore_path, datacenter_obj, host)
+        download_url = _build_datastore_file_url(datastore_path, datacenter_obj, hostname)
         if download_url is None:
             raise RuntimeError(
                 "Unable to download datastore file: neither FileManager.InitiateFileTransferFromDatastore nor datastore URL build is available. "
@@ -303,16 +334,16 @@ def _download_datastore_file(si, content, datacenter_obj, datastore_path, out_pa
             )
 
     stub = getattr(si, "_stub", None)
-    host = None
+    hostname = None
     if stub is not None:
-        host = getattr(stub, "host", None)
-        if not host:
+        hostname = getattr(stub, "hostname", None)
+        if not hostname:
             uri = getattr(stub, "uri", None)
             if uri:
                 parsed_uri = urllib.parse.urlparse(uri)
-                host = parsed_uri.netloc
+                hostname = parsed_uri.netloc
 
-    download_url = _normalize_datastore_url(download_url, host)
+    download_url = _normalize_datastore_url(download_url, hostname)
     if not download_url:
         raise RuntimeError("download_url is empty after normalization")
     if not isinstance(download_url, str):
@@ -324,7 +355,7 @@ def _download_datastore_file(si, content, datacenter_obj, datastore_path, out_pa
         headers["Cookie"] = cookie
 
     ctx = None
-    if not verify_tls:
+    if not validate_certs:
         ctx = ssl._create_unverified_context()
 
     request = urllib.request.Request(download_url, headers=headers)
@@ -335,11 +366,16 @@ def _download_datastore_file(si, content, datacenter_obj, datastore_path, out_pa
         out_file.write(data)
 
 
-def _delete_datastore_file(content, datacenter_obj, datastore_path):
+def _delete_datastore_file(content, datacenter_obj, datastore_path, timeout=60):
     task = content.fileManager.DeleteDatastoreFile_Task(
         name=datastore_path, datacenter=datacenter_obj
     )
+    deadline = time.monotonic() + timeout
     while task.info.state not in ("success", "error"):
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                "Timed out waiting for datastore file deletion after {0}s".format(timeout)
+            )
         time.sleep(1.0)
     if task.info.state != "success":
         raise RuntimeError(
@@ -357,9 +393,9 @@ class VMKeyboard(object):
         mapped CHAR_MAP keys are exercised during testing.
     """
 
-    def __init__(self, vm, delay=0.05):
+    def __init__(self, vm, sleep_time=0.05):
         self.vm = vm
-        self.delay = delay
+        self.sleep_time = sleep_time
         self.caps_on = False
 
     def _set_caps(self, wanted):
@@ -384,7 +420,7 @@ class VMKeyboard(object):
                 )
             )
         _press_key(self.vm, SPECIAL_KEYS[key_name])
-        time.sleep(self.delay)
+        time.sleep(self.sleep_time)
 
     def type(self, text):
         skipped = []
@@ -406,7 +442,7 @@ class VMKeyboard(object):
                 self._set_caps(False)
                 _press_key(self.vm, hid)
             
-            time.sleep(self.delay)
+            time.sleep(self.sleep_time)
         
         self._set_caps(False)
         return skipped
@@ -418,19 +454,22 @@ class VMKeyboard(object):
         return skipped
 
 
-def _connect_vsphere(host, user, password, port=443, validate_certs=True):
-    if not HAS_PYVMOMI:
-        raise RuntimeError("pyVmomi is required")
-    if SmartConnect is None:
-        raise RuntimeError("SmartConnect is not available")
+def _connect_vsphere(hostname, username, password, port=443, validate_certs=True):
     if validate_certs:
         si = SmartConnect(
-            host=host, user=user, pwd=password, port=port
+            hostname=hostname,
+            username=username,
+            pwd=password,
+            port=port
         )
     else:
         ctx = ssl._create_unverified_context()
         si = SmartConnect(
-            host=host, user=user, pwd=password, port=port, sslContext=ctx
+            hostname=hostname,
+            username=username,
+            pwd=password,
+            port=port,
+            sslContext=ctx
         )
     return si
 
@@ -439,15 +478,19 @@ def _screenshot(
     si,
     content,
     vm,
-    vmname,
+    name,
     datacenter,
     keep_screenshot=False,
-    verify_tls=True,
+    validate_certs=True,
 ):
     try:
         print("Requesting VM screenshot via CreateScreenshot_Task()...")
         task = vm.CreateScreenshot_Task()
+        deadline = time.monotonic() + 60
         while task.info.state not in ("success", "error"):
+            if time.monotonic() > deadline:
+                print("Timed out waiting for screenshot task after 60s", file=sys.stderr)
+                return
             time.sleep(1.0)
 
         if task.info.state != "success":
@@ -475,12 +518,10 @@ def _screenshot(
                 file=sys.stderr,
             )
             return
-
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         out_file = os.path.join(
-            script_dir,
-            "{0}-console-test-{1}.png".format(vmname, ts),
+            os.getcwd(),
+            "{0}-console-test-{1}.png".format(name, ts),
         )
 
         print("Downloading screenshot to:", out_file)
@@ -490,7 +531,7 @@ def _screenshot(
             datacenter_obj=dc,
             datastore_path=datastore_path,
             out_path=out_file,
-            verify_tls=verify_tls,
+            validate_certs=validate_certs,
         )
         if not keep_screenshot:
             print("Deleting screenshot from datastore: {0}".format(datastore_path))
@@ -512,16 +553,16 @@ def _screenshot(
 
 
 def esxi_vm_console(
-    host,
-    user,
+    hostname,
+    username,
     password,
-    vmname,
-    texts,
+    name,
+    commands,
     datacenter="ha-datacenter",
     esxi_hostname=None,
     port=443,
-    delay=0.1,
-    no_validate_certs=False,
+    sleep_time=0.1,
+    validate_certs=True,
     screenshot=False,
     keep_screenshot=False,
     dry_run=False,
@@ -531,23 +572,23 @@ def esxi_vm_console(
         return 1
 
     print(
-        "Connecting to {host} as {user}, vm={vm}".format(
-            host=host, user=user, vm=vmname
+        "Connecting to {hostname} as {username}, vm={vm}".format(
+            hostname=hostname, username=username, vm=name
         )
     )
     si = None
     try:
         si = _connect_vsphere(
-            host=host,
-            user=user,
+            hostname=hostname,
+            username=username,
             password=password,
             port=port,
-            validate_certs=not no_validate_certs,
+            validate_certs=validate_certs,
         )
         content = si.RetrieveContent()
         vm = _find_vm(
             content,
-            vmname,
+            name,
             datacenter=datacenter,
             esxi_hostname=esxi_hostname,
         )
@@ -566,13 +607,13 @@ def esxi_vm_console(
             )
             return 0
 
-        kb = VMKeyboard(vm, delay=delay)
+        kb = VMKeyboard(vm, sleep_time=sleep_time)
         kb.reset_caps()
 
         all_skipped = []
-        for text, wait in texts or []:
-            print(f"Sending text to VM console: {text}")
-            skipped = kb.type_line(text)
+        for command, wait in commands or []:
+            print(f"Sending command to VM console: {command}")
+            skipped = kb.type_line(command)
             all_skipped.extend(skipped)
             if wait is not None:
                 time.sleep(wait)
@@ -582,10 +623,10 @@ def esxi_vm_console(
                     si=si,
                     content=content,
                     vm=vm,
-                    vmname=vmname,
+                    name=name,
                     datacenter=datacenter,
                     keep_screenshot=keep_screenshot,
-                    verify_tls=not no_validate_certs,
+                    validate_certs=validate_certs,
                 )
 
         if all_skipped:
@@ -609,17 +650,6 @@ def esxi_vm_console(
 
 if __name__ == "__main__":
     import argparse
-    import sys
-
-    sys.argv.extend([
-        "--host", "192.168.200.161",
-        "--user", "root",
-        "--password", "cmb@Dm1n",
-        "--vmname", "SBCE-VM",
-        "--no-validate-certs",
-        "--text", "echo Hello World!\n", "5",
-        "--text", "echo Bye World!", "1",
-    ])
 
     class StringOrPair(argparse.Action):
         def __call__(self, parser, namespace, values, option_string=None):
@@ -656,7 +686,7 @@ if __name__ == "__main__":
                 return ", ".join(parts)
 
     parser = argparse.ArgumentParser(
-        description="Send text to a VMware VM console.",
+        description="Send commands to a VMware guest console.",
         add_help=False,
         formatter_class=CustomHelpFormatter,
     )
@@ -666,12 +696,12 @@ if __name__ == "__main__":
 
     # Add mandatory arguments
     mandatory.add_argument(
-        "--host",
+        "--hostname",
         required=True,
         help="vCenter or ESXi hostname/IP"
     )
     mandatory.add_argument(
-        "--user",
+        "--username",
         required=True,
         help="vCenter or ESXi username"
     )
@@ -681,17 +711,18 @@ if __name__ == "__main__":
         help="vCenter or ESXi password"
     )
     mandatory.add_argument(
-        "--vmname",
+        "--name",
         required=True,
         help="Virtual Machine name"
     )
     mandatory.add_argument(
-        "--text",
+        "--command",
         nargs='+',
-        dest="texts",
+        required=True,
+        dest="commands",
         action=StringOrPair,
-        help="Text to send to the VM console, optionally followed by wait time in seconds,\
-              or multiple --text arguments each with their own text and optional wait time"
+        help="Command to send to guest console, optionally followed by wait time in seconds,\
+              or multiple --command arguments each with their own command and optional wait time"
     )
     
     # Add optional arguments
@@ -708,7 +739,7 @@ if __name__ == "__main__":
     optional.add_argument(
         "--esxi-hostname",
         default=None,
-        help="Require VM to run on this ESXi host (name or first label)"
+        help="Require VM to run on this ESXi hostname (name or first label)"
     )
     optional.add_argument(
         "--port",
@@ -717,22 +748,23 @@ if __name__ == "__main__":
         help="HTTPS port (default 443)"
     )
     optional.add_argument(
-        "--delay",
+        "--sleep-time",
         type=float,
-        default=0.1,
-        help="Delay between key presses (seconds, default 0.1)"
+        default=0.05,
+        help="sleep time between key presses (seconds, default 0.1)"
     )
     optional.add_argument(
         "--no-validate-certs",
-        action="store_true",
-        default=False,
-        help="Do not validate TLS certificates"
+        action="store_false",
+        default=True,
+        dest="validate_certs",
+        help="Disable TLS certificate validation"
     )
     optional.add_argument(
         "--screenshot",
         action="store_true",
         default=False,
-        help="Request/download a screenshot of console after sending text"
+        help="Request/download a screenshot of guest console after sending text"
     )
     optional.add_argument(
         "--keep-screenshot",
@@ -745,6 +777,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Only print characters that would be sent, do not send any keys"
     )
+
+    # For testing purposes only, do not remove
+    # sys.argv.extend([
+    #     "--hostname", "192.168.200.161",
+    #     "--username", "root",
+    #     "--password", "cmb@Dm1n",
+    #     "--name", "SBCE-VM",
+    #     "--command", "echo Hello World!", "5",
+    #     "--command", "echo Bye World!", "1",
+    #     "--no-validate-certs",
+    # ])
 
     args = parser.parse_args()
     print(args)
