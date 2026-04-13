@@ -1,0 +1,20 @@
+- esxi_guest_sendkey:
+    hostname: '{{ vcenter_hostname }}'
+    username: '{{ vcenter_username }}'
+    password: '{{ vcenter_password }}'
+    datacenter: Datacenter1
+    esxi_hostname: esxi1
+    datastore: datastore1
+    name: SBCE-VM
+    sleep_time: 0.1
+    keep-screenshot: False
+    commands:
+    - string_send: "192.168.11.1"
+      keys_send: ENTER
+      sleep_time: 1
+    - string_send: "255.255.255.0"
+      keys_send: ENTER
+      sleep_time: 2
+      screenshot: True
+      validate_certs: False
+    delegate_to: localhost
