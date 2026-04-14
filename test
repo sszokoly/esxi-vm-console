@@ -7,14 +7,15 @@
     datastore: datastore1
     name: SBCE-VM
     sleep_time: 0.1
-    keep-screenshot: False
+    keep_screenshot: False
     commands:
     - string_send: "192.168.11.1"
-      keys_send: ENTER
+      sleep_time: 1
+    - keys_send: ENTER
       sleep_time: 1
     - string_send: "255.255.255.0"
-      keys_send: ENTER
+      keys_send: TAB
       sleep_time: 2
       screenshot: True
-      validate_certs: False
+    validate_certs: False
     delegate_to: localhost

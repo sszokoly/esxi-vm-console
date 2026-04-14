@@ -319,7 +319,7 @@ def _download_datastore_file(
         stub = getattr(si, "_stub", None)
         hostname = None
         if stub is not None:
-            hostname = getattr(stub, "hostname", None)
+            hostname = getattr(stub, "host", None)
             if not hostname:
                 uri = getattr(stub, "uri", None)
                 if uri:
@@ -336,7 +336,7 @@ def _download_datastore_file(
     stub = getattr(si, "_stub", None)
     hostname = None
     if stub is not None:
-        hostname = getattr(stub, "hostname", None)
+        hostname = getattr(stub, "host", None)
         if not hostname:
             uri = getattr(stub, "uri", None)
             if uri:
@@ -449,24 +449,33 @@ class VMKeyboard(object):
 
     def type_line(self, text):
         skipped = self.type(text)
-        if text and not text.endswith("\n"):
-            self.special("ENTER")
+        #if text and not text.endswith("\n"):
+            #self.special("ENTER")
         return skipped
 
 
-def _connect_vsphere(hostname, username, password, port=443, validate_certs=True):
+def _connect_vsphere(
+    hostname,
+    username,
+    password,
+    port=443,
+    validate_certs=True
+):
+    if not HAS_PYVMOMI or SmartConnect is None:
+        raise RuntimeError("pyVmomi is required to connect to vSphere")
+    
     if validate_certs:
         si = SmartConnect(
-            hostname=hostname,
-            username=username,
+            host=hostname,
+            user=username,
             pwd=password,
             port=port
         )
     else:
         ctx = ssl._create_unverified_context()
         si = SmartConnect(
-            hostname=hostname,
-            username=username,
+            host=hostname,
+            user=username,
             pwd=password,
             port=port,
             sslContext=ctx
@@ -521,7 +530,7 @@ def _screenshot(
         ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         out_file = os.path.join(
             os.getcwd(),
-            "{0}-console-test-{1}.png".format(name, ts),
+            "{0}-{1}.png".format(name, ts),
         )
 
         print("Downloading screenshot to:", out_file)
@@ -565,7 +574,6 @@ def esxi_vm_console(
     validate_certs=True,
     screenshot=False,
     keep_screenshot=False,
-    dry_run=False,
 ):
     if not HAS_PYVMOMI:
         print("pyVmomi is required for this tester", file=sys.stderr)
@@ -595,28 +603,26 @@ def esxi_vm_console(
 
         print("Connected. VM runtime host:", getattr(vm.runtime.host, "name", "?"))
 
-        if dry_run:
-            line_chars = [ch for ch in sorted(CHAR_MAP.keys())
-                if ch not in ("\n", "\t", "\b")]
-            print("Dry run. Characters that would be sent in one line:")
-            print("".join(line_chars))
-            print(
-                "Special keys to be sent: {0}".format(
-                    ", ".join(sorted(SPECIAL_KEYS.keys()))
-                )
-            )
-            return 0
-
         kb = VMKeyboard(vm, sleep_time=sleep_time)
         kb.reset_caps()
 
         all_skipped = []
-        for command, wait in commands or []:
-            print(f"Sending command to VM console: {command}")
-            skipped = kb.type_line(command)
+        for command in commands:
+            string_send = command.get("string_send", None)
+            keys_send = command.get("keys_send", None)
+            sleep_time = command.get("sleep_time", None)
+            screenshot = command.get("screenshot", False)
+            
+            if keys_send is not None:
+                print(f"Sending special key: {keys_send}")
+                kb.special(keys_send)
+            elif string_send is not None:
+                print(f"Sending string: {string_send}")
+                skipped = kb.type_line(string_send)
             all_skipped.extend(skipped)
-            if wait is not None:
-                time.sleep(wait)
+            
+            if sleep_time:
+                time.sleep(sleep_time)
 
             if screenshot:
                 _screenshot(
@@ -649,146 +655,24 @@ def esxi_vm_console(
                 pass
 
 if __name__ == "__main__":
-    import argparse
-
-    class StringOrPair(argparse.Action):
-        def __call__(self, parser, namespace, values, option_string=None):
-            current = getattr(namespace, self.dest, None) or []
-            if isinstance(values, list):
-                if len(values) == 1:
-                    current.append((values[0], None))
-                else:
-                    current.append((values[0], float(values[1])))
-            else:
-                current.append((values, None))
-            setattr(namespace, self.dest, current)
-
-    class CustomHelpFormatter(argparse.HelpFormatter):
-        def _format_action_invocation(self, action):
-            if not action.option_strings:
-                # Positional argument
-                (metavar,) = self._metavar_formatter(action, action.dest)(1)
-                return metavar
-            else:
-                parts = []
-                # if Optional doesn't take a value, format is: -s, --long
-                if action.nargs == 0:
-                    parts.extend(action.option_strings)
-                # if Optional takes a value, format is: -s ARGS, --long=ARGS
-                else:
-                    default = action.dest.upper()
-                    args_string = self._format_args(action, default)
-                    for option_string in action.option_strings:
-                        if option_string.startswith("--"):
-                            parts.append("%s=%s" % (option_string, args_string))
-                        else:
-                            parts.append("%s %s" % (option_string, args_string))
-                return ", ".join(parts)
-
-    parser = argparse.ArgumentParser(
-        description="Send commands to a VMware guest console.",
-        add_help=False,
-        formatter_class=CustomHelpFormatter,
-    )
-
-    mandatory = parser.add_argument_group("Mandatory arguments")
-    optional = parser.add_argument_group("Optional arguments")
-
-    # Add mandatory arguments
-    mandatory.add_argument(
-        "--hostname",
-        required=True,
-        help="vCenter or ESXi hostname/IP"
-    )
-    mandatory.add_argument(
-        "--username",
-        required=True,
-        help="vCenter or ESXi username"
-    )
-    mandatory.add_argument(
-        "--password",
-        required=True,
-        help="vCenter or ESXi password"
-    )
-    mandatory.add_argument(
-        "--name",
-        required=True,
-        help="Virtual Machine name"
-    )
-    mandatory.add_argument(
-        "--command",
-        nargs='+',
-        required=True,
-        dest="commands",
-        action=StringOrPair,
-        help="Command to send to guest console, optionally followed by wait time in seconds,\
-              or multiple --command arguments each with their own command and optional wait time"
-    )
-    
-    # Add optional arguments
-    optional.add_argument(
-        "-h", "--help",
-        action="help",
-        help="show this help message and exit"
-    )
-    optional.add_argument(
-        "--datacenter",
-        default="ha-datacenter",
-        help="Datacenter name (default 'ha-datacenter')"
-    )
-    optional.add_argument(
-        "--esxi-hostname",
-        default=None,
-        help="Require VM to run on this ESXi hostname (name or first label)"
-    )
-    optional.add_argument(
-        "--port",
-        type=int,
-        default=443,
-        help="HTTPS port (default 443)"
-    )
-    optional.add_argument(
-        "--sleep-time",
-        type=float,
-        default=0.05,
-        help="sleep time between key presses (seconds, default 0.1)"
-    )
-    optional.add_argument(
-        "--no-validate-certs",
-        action="store_false",
-        default=True,
-        dest="validate_certs",
-        help="Disable TLS certificate validation"
-    )
-    optional.add_argument(
-        "--screenshot",
-        action="store_true",
-        default=False,
-        help="Request/download a screenshot of guest console after sending text"
-    )
-    optional.add_argument(
-        "--keep-screenshot",
-        action="store_true",
-        default=False,
-        help="Leave screenshot in datastore after downloading it"
-    )
-    optional.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Only print characters that would be sent, do not send any keys"
-    )
-
-    # For testing purposes only, do not remove
-    # sys.argv.extend([
-    #     "--hostname", "192.168.255.161",
-    #     "--username", "root",
-    #     "--password", "blablabla,
-    #     "--name", "SBCE-VM",
-    #     "--command", "echo Hello World!", "5",
-    #     "--command", "echo Bye World!", "1",
-    #     "--no-validate-certs",
-    # ])
-
-    args = parser.parse_args()
+    args = {
+        "hostname": "192.168.200.161",
+        "username": "root",
+        "password": "blabla",
+        "name": "SBCE-VM",
+        "datacenter": "ha-datacenter",
+        "esxi_hostname": None,
+        "port": 443,
+        "sleep_time": 0.05,
+        "validate_certs": False,
+        "screenshot": False,
+        "keep_screenshot": False,
+        "commands": [
+            {"string_send": "echo Hello World!" },
+            {"keys_send": "ENTER"},
+            {"string_send": "echo Hello World!" },
+            {"keys_send": "ENTER", "sleep_time": 2, "screenshot": True},
+        ]
+    }
     print(args)
-    sys.exit(esxi_vm_console(**vars(args)))
+    sys.exit(esxi_vm_console(**args))
